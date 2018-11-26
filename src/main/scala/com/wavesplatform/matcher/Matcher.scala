@@ -4,7 +4,7 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 
-import akka.actor.{ActorRef, ActorSystem}
+import akka.actor.{ActorRef, ActorSystem, Props}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.Http.ServerBinding
 import akka.pattern.gracefulStop
@@ -15,7 +15,7 @@ import com.wavesplatform.db._
 import com.wavesplatform.matcher.api.{MatcherApiRoute, OrderBookSnapshotHttpCache}
 import com.wavesplatform.matcher.market.OrderBookActor.MarketStatus
 import com.wavesplatform.matcher.market.{MatcherActor, MatcherTransactionWriter, OrderHistoryActor}
-import com.wavesplatform.matcher.model.{ExchangeTransactionCreator, OrderBook, OrderValidator}
+import com.wavesplatform.matcher.model.{ExchangeTransactionCreator, OrderBook}
 import com.wavesplatform.settings.WavesSettings
 import com.wavesplatform.state.{Blockchain, EitherExt2}
 import com.wavesplatform.transaction.assets.exchange.AssetPair
@@ -42,16 +42,6 @@ class Matcher(actorSystem: ActorSystem,
   private val pairBuilder        = new AssetPairBuilder(settings.matcherSettings, blockchain)
   private val orderBookCache     = new ConcurrentHashMap[AssetPair, OrderBook](1000, 0.9f, 10)
   private val transactionCreator = new ExchangeTransactionCreator(blockchain, matcherPrivateKey, matcherSettings, time)
-  private val orderValidator = new OrderValidator(
-    db,
-    blockchain,
-    transactionCreator,
-    utx.portfolio,
-    pairBuilder.validateAssetPair,
-    settings.matcherSettings,
-    matcherPrivateKey,
-    time
-  )
 
   private val orderBooks = new AtomicReference(Map.empty[AssetPair, Either[Unit, ActorRef]])
   private val orderBooksSnapshotCache = new OrderBookSnapshotHttpCache(
@@ -67,25 +57,6 @@ class Matcher(actorSystem: ActorSystem,
     orderBooksSnapshotCache.invalidate(assetPair)
   }
 
-  lazy val matcherApiRoutes = Seq(
-    MatcherApiRoute(
-      pairBuilder,
-      orderValidator,
-      matcher,
-      orderHistory,
-      p => Option(orderBooks.get()).flatMap(_.get(p)),
-      p => Option(marketStatuses.get(p)),
-      orderBooksSnapshotCache,
-      settings,
-      db,
-      time
-    )
-  )
-
-  lazy val matcherApiTypes: Set[Class[_]] = Set(
-    classOf[MatcherApiRoute]
-  )
-
   lazy val matcher: ActorRef = actorSystem.actorOf(
     MatcherActor.props(
       pairBuilder.validateAssetPair,
@@ -100,6 +71,27 @@ class Matcher(actorSystem: ActorSystem,
       transactionCreator.createTransaction
     ),
     MatcherActor.name
+  )
+
+  private lazy val addressActors = actorSystem.actorOf(Props(new AddressDirectory(utx.portfolio, matcher)), "addresses")
+
+  private lazy val matcherApiRoutes = Seq(
+    MatcherApiRoute(
+      pairBuilder,
+      matcherPrivateKey,
+      matcher,
+      p => Option(orderBooks.get()).flatMap(_.get(p)),
+      addressActors,
+      p => Option(marketStatuses.get(p)),
+      orderBooksSnapshotCache,
+      settings,
+      db,
+      time
+    )
+  )
+
+  lazy val matcherApiTypes: Set[Class[_]] = Set(
+    classOf[MatcherApiRoute]
   )
 
   private lazy val db = openDB(matcherSettings.dataDir)

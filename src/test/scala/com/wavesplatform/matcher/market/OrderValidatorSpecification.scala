@@ -2,7 +2,7 @@ package com.wavesplatform.matcher.market
 
 import com.google.common.base.Charsets
 import com.wavesplatform.OrderOps._
-import com.wavesplatform.account.PrivateKeyAccount
+import com.wavesplatform.account.{Address, PrivateKeyAccount}
 import com.wavesplatform.features.{BlockchainFeature, BlockchainFeatures}
 import com.wavesplatform.lang.ScriptVersion
 import com.wavesplatform.lang.v1.compiler.Terms
@@ -12,7 +12,7 @@ import com.wavesplatform.matcher.{MatcherSettings, MatcherTestData}
 import com.wavesplatform.settings.Constants
 import com.wavesplatform.state.diffs.produce
 import com.wavesplatform.state.{AssetDescription, Blockchain, ByteStr, LeaseBalance, Portfolio}
-import com.wavesplatform.transaction.Proofs
+import com.wavesplatform.transaction.{AssetId, Proofs}
 import com.wavesplatform.transaction.assets.exchange._
 import com.wavesplatform.transaction.smart.script.ScriptCompiler
 import com.wavesplatform.transaction.smart.script.v1.ScriptV1
@@ -38,14 +38,16 @@ class OrderValidatorSpecification
   private val defaultTs    = 1000
 
   private val defaultPortfolio = Portfolio(0, LeaseBalance.empty, Map(wbtc -> 10 * Constants.UnitsInWave))
+  private def defaultTradableBalance(assetId: Option[AssetId]) = assetId.fold(defaultPortfolio.spendableBalance) { id =>
+    defaultPortfolio.assets.getOrElse(id, 0l)
+  }
 
   "OrderValidator" should {
-    "allow buying WAVES for BTC without balance for order fee" in
-      portfolioTest(defaultPortfolio) { (ov, bc) =>
-        val o = newBuyOrder
-        (bc.accountScript _).when(o.sender.toAddress).returns(None)
-        ov.validateNewOrder(o) shouldBe 'right
-      }
+    "allow buying WAVES for BTC without balance for order fee" in {
+      val o = newBuyOrder
+      val v = OrderValidator.accountStateAware(o.sender, defaultTradableBalance, 0, 0) _
+      v(o) shouldBe 'right
+    }
 
     "reject new order" when {
       "asset balance is negative" in portfolioTest(Portfolio(0, LeaseBalance.empty, Map(wbtc -> -10 * Constants.UnitsInWave))) { (ov, _) =>
@@ -247,19 +249,19 @@ class OrderValidatorSpecification
     }
   }
 
-  private def portfolioTest(p: Portfolio)(f: (OrderValidator, Blockchain) => Any): Unit = {
+  private def portfolioTest(f: (OrderValidator, Blockchain) => Any): Unit = {
     val bc = stub[Blockchain]
     (bc.assetScript _).when(wbtc).returns(None)
     (bc.assetDescription _).when(wbtc).returns(mkAssetDescription(8)).anyNumberOfTimes()
     val transactionCreator = new ExchangeTransactionCreator(bc, MatcherAccount, matcherSettings, ntpTime)
-    f(new OrderValidator(db, bc, transactionCreator, _ => p, Right(_), matcherSettings, MatcherAccount, ntpTime), bc)
+    f(new OrderValidator(db, bc, transactionCreator, Right(_), matcherSettings, MatcherAccount, ntpTime), bc)
   }
 
   private def settingsTest(settings: MatcherSettings)(f: OrderValidator => Any): Unit = {
     val bc = stub[Blockchain]
     (bc.assetDescription _).when(wbtc).returns(mkAssetDescription(8)).anyNumberOfTimes()
     val transactionCreator = new ExchangeTransactionCreator(bc, MatcherAccount, matcherSettings, ntpTime)
-    f(new OrderValidator(db, bc, transactionCreator, _ => defaultPortfolio, Right(_), settings, MatcherAccount, ntpTime))
+    f(new OrderValidator(db, bc, transactionCreator, Right(_), settings, MatcherAccount, ntpTime))
   }
 
   private def validateOrderProofsTest(proofs: Seq[ByteStr]): Unit = portfolioTest(defaultPortfolio) { (ov, bc) =>
