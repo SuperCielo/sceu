@@ -244,7 +244,6 @@ object MatcherActor {
                    assetPair,
                    updateSnapshot(assetPair),
                    updateMarketStatus(assetPair),
-                   utx,
                    allChannels,
                    settings,
                    requestResolver,

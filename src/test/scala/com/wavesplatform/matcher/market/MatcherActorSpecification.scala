@@ -15,7 +15,6 @@ import com.wavesplatform.state.{AssetDescription, Blockchain, ByteStr}
 import com.wavesplatform.transaction.AssetId
 import com.wavesplatform.transaction.assets.exchange.AssetPair
 import com.wavesplatform.utils.{EmptyBlockchain, randomBytes}
-import com.wavesplatform.utx.UtxPool
 import io.netty.channel.group.ChannelGroup
 import org.scalamock.scalatest.PathMockFactory
 import org.scalatest.BeforeAndAfterEach
@@ -124,16 +123,7 @@ class MatcherActorSpecification
           ob,
           (assetPair, matcher) =>
             OrderBookActor
-              .props(matcher,
-                     assetPair,
-                     _ => {},
-                     _ => {},
-                     mock[UtxPool],
-                     mock[ChannelGroup],
-                     matcherSettings,
-                     akkaRequestResolver(matcher),
-                     txFactory,
-                     ntpTime),
+              .props(matcher, assetPair, _ => {}, _ => {}, mock[ChannelGroup], matcherSettings, akkaRequestResolver(matcher), txFactory, ntpTime),
           blockchain.assetDescription
         )
       ))
