@@ -267,7 +267,7 @@ object MatcherActor {
     def tryComplete(): Unit  = if (isCompleted) onComplete()
   }
 
-  case class Request[T](id: RequestId, payload: T)
+  case class Request[T](seqNr: RequestId, payload: T)
 
   case object SaveSnapshot
 

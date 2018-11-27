@@ -6,11 +6,11 @@ import akka.actor.{Actor, ActorRef, Kill, Props, Terminated}
 import akka.testkit.{ImplicitSender, TestActorRef, TestProbe}
 import com.wavesplatform.NTPTime
 import com.wavesplatform.account.PrivateKeyAccount
+import com.wavesplatform.matcher.MatcherTestData
 import com.wavesplatform.matcher.api.OrderAccepted
 import com.wavesplatform.matcher.market.MatcherActor.{GetMarkets, MarketData}
 import com.wavesplatform.matcher.market.MatcherActorSpecification.FailAtStartActor
 import com.wavesplatform.matcher.model.ExchangeTransactionCreator
-import com.wavesplatform.matcher.{Matcher, MatcherTestData}
 import com.wavesplatform.state.{AssetDescription, Blockchain, ByteStr}
 import com.wavesplatform.transaction.AssetId
 import com.wavesplatform.transaction.assets.exchange.AssetPair
@@ -52,7 +52,7 @@ class MatcherActorSpecification
         .when(order.matcherPublicKey.toAddress)
         .returns(None)
 
-      actor ! Matcher.wrap(order)
+      actor ! wrap(order)
       expectMsg(OrderAccepted(order))
 
       actor ! GetMarkets
@@ -76,7 +76,7 @@ class MatcherActorSpecification
             )
           ))
 
-        actor ! Matcher.wrap(buy(pair, 2000, 1))
+        actor ! wrap(buy(pair, 2000, 1))
         eventually { ob.get()(pair) shouldBe 'left }
       }
 
@@ -92,8 +92,8 @@ class MatcherActorSpecification
         val pair2  = AssetPair(a2, a3)
         val order2 = buy(pair2, 2000, 1)
 
-        actor ! Matcher.wrap(order1)
-        actor ! Matcher.wrap(order2)
+        actor ! wrap(order1)
+        actor ! wrap(order2)
         receiveN(2)
 
         ob.get()(pair1) shouldBe 'right
