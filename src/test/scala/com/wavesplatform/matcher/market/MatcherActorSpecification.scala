@@ -70,6 +70,7 @@ class MatcherActorSpecification
         val actor = waitInitialization(
           TestActorRef(
             new MatcherActor(
+              _ => (),
               ob,
               (_, _) => Props(classOf[FailAtStartActor], pair),
               blockchain.assetDescription
@@ -120,6 +121,7 @@ class MatcherActorSpecification
     waitInitialization(
       TestActorRef(
         new MatcherActor(
+          _ => (),
           ob,
           (assetPair, matcher) =>
             OrderBookActor
