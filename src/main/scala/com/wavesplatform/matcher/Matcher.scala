@@ -130,8 +130,8 @@ class Matcher(actorSystem: ActorSystem,
 
   lazy val matcher: ActorRef = actorSystem.actorOf(
     MatcherActor.props(
+      matcherSettings,
       nr => {
-        println(s"==> RECOVERED WITH $nr")
         var lastUnreadOffset = nr + 1
         commandsConsumer = Some(
           actorSystem.scheduler.schedule(0.seconds, 100.millis) {

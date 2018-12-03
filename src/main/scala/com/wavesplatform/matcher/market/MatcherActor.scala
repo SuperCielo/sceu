@@ -22,7 +22,11 @@ import io.netty.channel.group.ChannelGroup
 import play.api.libs.json._
 import scorex.utils._
 
-class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
+import scala.collection.mutable
+
+// TODO: should send snapshot requests to OBA
+class MatcherActor(matcherSettings: MatcherSettings,
+                   recoveryCompletedWithCommandNr: Long => Unit,
                    orderBooks: AtomicReference[Map[AssetPair, Either[Unit, ActorRef]]],
                    orderBookActorProps: (AssetPair, ActorRef) => Props,
                    assetDescription: ByteStr => Option[AssetDescription])
@@ -34,6 +38,8 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
   private var tradedPairs            = Map.empty[AssetPair, MarketData]
   private var childrenNames          = Map.empty[ActorRef, AssetPair]
   private var lastSnapshotSequenceNr = 0L
+
+  private val oldestSnapshot = mutable.PriorityQueue.empty[(AssetPair, Long)](Ordering.by[(AssetPair, Long), Long](_._2).reverse)
 
   private var shutdownStatus: ShutdownStatus = ShutdownStatus(
     initiated = false,
@@ -82,19 +88,39 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
     orderBook
   }
 
+  private def snapshotOffset(pair: AssetPair): Long = {
+    val half = matcherSettings.snapshotsInterval / 2 - 1
+    half + (pair.key.hashCode % half)
+  }
+
+  private def shouldDoSnapshot(request: Request): Boolean =
+    oldestSnapshot.headOption.fold(false) {
+      case (oldestPair, oldestSnapshotNr) =>
+        val currOffset = request.seqNr
+        println(s"[${request.seqNr}] ${request.assetPair} == $oldestPair (${request.assetPair == oldestPair}) && " +
+          s"$currOffset >= ($oldestSnapshotNr + ${snapshotOffset(request.assetPair)}) (${currOffset >= (oldestSnapshotNr + snapshotOffset(request.assetPair))})")
+        request.assetPair == oldestPair && currOffset >= (oldestSnapshotNr + snapshotOffset(request.assetPair))
+    }
+
   /**
     * @param f (sender, orderBook)
     */
-  private def runFor(pair: AssetPair)(f: (ActorRef, ActorRef) => Unit): Unit = {
+  private def runFor(request: Request)(f: (ActorRef, ActorRef) => Unit): Unit = {
     val s = sender()
     if (shutdownStatus.initiated) s ! DuringShutdown
     else
-      orderBook(pair) match {
-        case Some(Right(ob)) => f(s, ob)
-        case Some(Left(_))   => s ! OrderBookUnavailable
+      orderBook(request.assetPair) match {
+        case Some(Right(ob)) =>
+          if (shouldDoSnapshot(request)) {
+            oldestSnapshot.dequeue()
+            ob ! SaveSnapshot
+          }
+          f(s, ob)
+        case Some(Left(_)) => s ! OrderBookUnavailable
         case None =>
-          val ob = createOrderBook(pair)
-          persistAsync(OrderBookCreated(pair))(_ => f(s, ob))
+          val ob = createOrderBook(request.assetPair)
+          persistAsync(OrderBookCreated(request.assetPair))(_ => ())
+          f(s, ob)
       }
   }
 
@@ -102,7 +128,7 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
     case GetMarkets => sender() ! tradedPairs.values.toSeq
 
     case request: Request.DeleteOrderBook =>
-      runFor(request.assetPair) { (sender, ref) =>
+      runFor(request) { (sender, ref) =>
         ref.tell(request, sender)
         orderBooks.getAndUpdate(_.filterNot { x =>
           x._2.right.exists(_ == ref)
@@ -113,8 +139,8 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
         saveSnapshot(Snapshot(tradedPairs.keySet))
       }
 
-    case x: Request.Place  => runFor(x.payload.assetPair)((_, orderBook) => orderBook ! x)
-    case x: Request.Cancel => runFor(x.inner.assetPair)((_, orderBook) => orderBook ! x)
+    case request: Request =>
+      runFor(request)((_, orderBook) => orderBook ! request)
 
     case Shutdown =>
       shutdownStatus = shutdownStatus.copy(
@@ -147,6 +173,9 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
       orderBooks.getAndUpdate { m =>
         childrenNames.get(ref).fold(m)(m.updated(_, Left(())))
       }
+
+    case OrderBookSnapshotUpdated(assetPair, lastProcessedCommandNr) =>
+      oldestSnapshot.enqueue(assetPair -> lastProcessedCommandNr)
   }
 
   override def receiveRecover: Receive = {
@@ -168,9 +197,10 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
   }
 
   private def collectOrderBooks(restOrderBooksNumber: Long, oldestCommandNr: Long): Receive = {
-    case OrderBookRecovered(lastProcessedCommandNr) =>
+    case OrderBookSnapshotUpdated(assetPair, lastProcessedCommandNr) =>
       val updatedRestOrderBooksNumber = restOrderBooksNumber - 1
       val updatedOldestCommandNr      = math.min(oldestCommandNr, lastProcessedCommandNr)
+      oldestSnapshot.enqueue(assetPair -> lastProcessedCommandNr)
 
       if (updatedRestOrderBooksNumber > 0) context.become(collectOrderBooks(updatedRestOrderBooksNumber, updatedOldestCommandNr))
       else {
@@ -257,7 +287,8 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
 object MatcherActor {
   def name = "matcher"
 
-  def props(recoveryCompletedWithCommandNr: Long => Unit,
+  def props(matcherSettings: MatcherSettings,
+            recoveryCompletedWithCommandNr: Long => Unit,
             validateAssetPair: AssetPair => Either[String, AssetPair],
             orderBooks: AtomicReference[Map[AssetPair, Either[Unit, ActorRef]]],
             updateSnapshot: AssetPair => OrderBook => Unit,
@@ -271,6 +302,7 @@ object MatcherActor {
             requestResolver: RequestResolver): Props =
     Props(
       new MatcherActor(
+        matcherSettings,
         recoveryCompletedWithCommandNr,
         orderBooks,
         (assetPair, matcher) =>
@@ -304,12 +336,17 @@ object MatcherActor {
 
   trait Request {
     def seqNr: RequestNr
+    def assetPair: AssetPair
   }
 
   object Request {
     case class DeleteOrderBook(seqNr: RequestNr, assetPair: AssetPair) extends Request
-    case class Place(seqNr: RequestNr, payload: Order)                 extends Request
-    case class Cancel(seqNr: RequestNr, inner: CancelOrder)            extends Request
+    case class Place(seqNr: RequestNr, payload: Order) extends Request {
+      override def assetPair: AssetPair = payload.assetPair
+    }
+    case class Cancel(seqNr: RequestNr, inner: CancelOrder) extends Request {
+      override def assetPair: AssetPair = inner.assetPair
+    }
 
     def toBytes(x: Request): Array[Byte] = Longs.toByteArray(x.seqNr) ++ {
       x match {

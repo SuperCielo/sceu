@@ -8,8 +8,9 @@ import com.wavesplatform.NTPTime
 import com.wavesplatform.account.PrivateKeyAccount
 import com.wavesplatform.matcher.MatcherTestData
 import com.wavesplatform.matcher.api.OrderAccepted
-import com.wavesplatform.matcher.market.MatcherActor.{GetMarkets, MarketData}
+import com.wavesplatform.matcher.market.MatcherActor.{GetMarkets, MarketData, Request, SaveSnapshot}
 import com.wavesplatform.matcher.market.MatcherActorSpecification.FailAtStartActor
+import com.wavesplatform.matcher.market.OrderBookActor.OrderBookSnapshotUpdated
 import com.wavesplatform.matcher.model.ExchangeTransactionCreator
 import com.wavesplatform.state.{AssetDescription, Blockchain, ByteStr}
 import com.wavesplatform.transaction.AssetId
@@ -70,6 +71,7 @@ class MatcherActorSpecification
         val actor = waitInitialization(
           TestActorRef(
             new MatcherActor(
+              matcherSettings,
               _ => (),
               ob,
               (_, _) => Props(classOf[FailAtStartActor], pair),
@@ -113,6 +115,106 @@ class MatcherActorSpecification
 
     "delete order books" is pending
     "forward new orders to order books" is pending
+
+    "forces an order book to create a snapshot if it didn't do snapshots for a long time" when {
+      // snapshot each 13 messages
+      val pair = AssetPair(Some(ByteStr(Array(1))), Some(ByteStr(Array(2))))
+
+      "first time" in {
+        val (props, probe) = orderBookActor(pair)
+        val actor = waitInitialization(
+          TestActorRef(
+            new MatcherActor(
+              matcherSettings.copy(snapshotsInterval = 20),
+              _ => (),
+              emptyOrderBookRefs,
+              (_, _) => props,
+              blockchain.assetDescription
+            )
+          ))
+
+        val ts = System.currentTimeMillis()
+        (0 to 14).foreach { i =>
+          actor ! wrap(i, buy(pair, amount = 1000, price = 1, ts = Some(ts + i)))
+        }
+
+        probe.expectMsg(OrderBookSnapshotUpdated(pair, 13))
+      }
+
+      "later" in {
+        // snapshot each 13 messages
+        val (props, probe) = orderBookActor(pair)
+        val actor = waitInitialization(
+          TestActorRef(
+            new MatcherActor(
+              matcherSettings.copy(snapshotsInterval = 20),
+              _ => (),
+              emptyOrderBookRefs,
+              (_, _) => props,
+              blockchain.assetDescription
+            )
+          ))
+
+        val ts = System.currentTimeMillis()
+        (0 to 14).foreach { i =>
+          actor ! wrap(i, buy(pair, amount = 1000, price = 1, ts = Some(ts + i)))
+        }
+        probe.expectMsg(OrderBookSnapshotUpdated(pair, 13))
+
+        (15 to 27).foreach { i =>
+          actor ! wrap(i, buy(pair, amount = 1000, price = 1, ts = Some(ts + i)))
+        }
+        probe.expectMsg(OrderBookSnapshotUpdated(pair, 26))
+      }
+
+      "received a lot of messages and tries to maintain a snapshot's offset" in {
+        val (props, probe) = orderBookActor(pair)
+        val actor = waitInitialization(
+          TestActorRef(
+            new MatcherActor(
+              matcherSettings.copy(snapshotsInterval = 20),
+              _ => (),
+              emptyOrderBookRefs,
+              (_, _) => props,
+              blockchain.assetDescription
+            )
+          ))
+
+        val ts = System.currentTimeMillis()
+        (0 to 30).foreach { i =>
+          actor ! wrap(i, buy(pair, amount = 1000, price = 1, ts = Some(ts + i)))
+        }
+
+        probe.expectMsg(OrderBookSnapshotUpdated(pair, 13))
+        probe.expectNoMessage(200.millis)
+
+        (31 to 40).foreach { i =>
+          actor ! wrap(i, buy(pair, amount = 1000, price = 1, ts = Some(ts + i)))
+        }
+        probe.expectMsg(OrderBookSnapshotUpdated(pair, 30))
+      }
+
+      def orderBookActor(assetPair: AssetPair): (Props, TestProbe) = {
+        val probe = TestProbe()
+        val props = Props(new Actor {
+          import context.dispatcher
+          private var nr = -1L
+
+          override def receive: Receive = {
+            case x: Request if x.seqNr > nr => nr = x.seqNr
+            case SaveSnapshot =>
+              val event = OrderBookSnapshotUpdated(assetPair, nr)
+              context.system.scheduler.scheduleOnce(200.millis) {
+                context.parent ! event
+                probe.ref ! event
+              }
+          }
+          context.parent ! OrderBookSnapshotUpdated(assetPair, 0)
+        })
+
+        (props, probe)
+      }
+    }
   }
 
   private def defaultActor(ob: AtomicReference[Map[AssetPair, Either[Unit, ActorRef]]] = emptyOrderBookRefs): TestActorRef[MatcherActor] = {
@@ -121,6 +223,7 @@ class MatcherActorSpecification
     waitInitialization(
       TestActorRef(
         new MatcherActor(
+          matcherSettings,
           _ => (),
           ob,
           (assetPair, matcher) =>

@@ -33,6 +33,10 @@ trait MatcherTestData extends NTPTime { _: Suite =>
   def wrap(x: CancelOrder): Request            = Request.Cancel(seqNr.incrementAndGet(), x)
   def wrap(x: DeleteOrderBookRequest): Request = Request.DeleteOrderBook(seqNr.incrementAndGet(), x.assetPair)
 
+  def wrap(n: Long, x: Order): Request                  = Request.Place(n, x)
+  def wrap(n: Long, x: CancelOrder): Request            = Request.Cancel(n, x)
+  def wrap(n: Long, x: DeleteOrderBookRequest): Request = Request.DeleteOrderBook(n, x.assetPair)
+
   def assetIdGen(prefix: Byte) = Gen.listOfN(signatureSize - 1, Arbitrary.arbitrary[Byte]).map(xs => Some(ByteStr(Array(prefix, xs: _*))))
   val distinctPairGen: Gen[AssetPair] = for {
     a1 <- assetIdGen(1.toByte)
